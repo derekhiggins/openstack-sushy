@@ -132,6 +132,16 @@ class VirtualMedia(base.ResourceBase):
             return True
         return False
 
+    def is_credentiasls_required(self, error=None):
+        """Check the response code and body and in case of failure
+
+        Try to determine if it happened due to missing Credentials
+        """
+        if (error.code.endswith('GeneralError')
+                and 'UserName' in error.detail):
+            return True
+        return False
+
     def insert_media(self, image, inserted=True, write_protected=True,
                      username=None, password=None, transfer_method=None):
         """Attach remote media to virtual media
@@ -187,29 +197,32 @@ class VirtualMedia(base.ResourceBase):
                 payload['Inserted'] = False
             if not write_protected:
                 payload['WriteProtected'] = False
-            # NOTE(janders) attempting to detect whether attachment failure is
-            # due to absence of TransferProtocolType param and if so adding it
-            try:
-                self._conn.post(target_uri, data=payload)
-            except exceptions.HTTPError as error:
-                if self.is_transfer_protocol_required(error):
-                    if payload['Image'].startswith('https://'):
-                        payload['TransferProtocolType'] = "HTTPS"
-                    elif payload['Image'].startswith('http://'):
-                        payload['TransferProtocolType'] = "HTTP"
+            while True:
+                try:
+                    self._conn.post(target_uri, data=payload)
+                    break
+                except exceptions.HTTPError as error:
+                    # NOTE(janders) attempting to detect whether attachment failure is
+                    # due to absence of TransferProtocolType param and if so adding it
+                    if payload.get('TransferProtocolType') == None and self.is_transfer_protocol_required(error):
+                        if payload['Image'].startswith('https://'):
+                            payload['TransferProtocolType'] = "HTTPS"
+                        elif payload['Image'].startswith('http://'):
+                            payload['TransferProtocolType'] = "HTTP"
+                        continue
 
                     # NOTE (iurygregory) we try to handle the case where a
                     # a TransferMethod is also required in the payload.
-                    try:
-                        self._conn.post(target_uri, data=payload)
-                    except exceptions.HTTPError as error2:
-                        if self.is_transfer_method_required(error2):
-                            payload['TransferMethod'] = "Stream"
-                            self._conn.post(target_uri, data=payload)
-                        else:
-                            raise
+                    if payload.get('TransferMethod') != "Stream" and self.is_transfer_method_required(error):
+                        payload['TransferMethod'] = "Stream"
+                        continue
 
-                else:
+                    # NOTE (derekh) we try to handle the case where
+                    # Credentials are required in the payload.
+                    if payload.get('UserName') == None and self.is_credentiasls_required(error):
+                        payload['UserName'] = "none"
+                        payload['Password'] = "none"
+                        continue
                     raise
         self.invalidate()
 
